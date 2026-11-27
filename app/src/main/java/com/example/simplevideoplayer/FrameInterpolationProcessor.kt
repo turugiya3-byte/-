@@ -5,6 +5,7 @@ import android.opengl.GLES20
 import android.opengl.GLES30
 import androidx.media3.common.Effect
 import androidx.media3.common.VideoFrameProcessingException
+import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
@@ -57,7 +58,6 @@ private class FrameInterpolationShaderProgram(
         }
     """.trimIndent()
 
-    // 近傍動き近似＋前フレーム残像バッファを使ったフレーム補間シェーダー
     private val fragmentShaderCode = """
         #version 300 es
         precision highp float;
@@ -79,7 +79,6 @@ private class FrameInterpolationShaderProgram(
 
             vec3 prev = texture(uPrevTex, vTexCoords).rgb;
 
-            // 8近傍から現在フレームに最も近い動き方向の画素を探索（簡易ブロックマッチング）
             vec2 bestOffset = vec2(0.0);
             float bestDiff = length(prev - curr);
 
@@ -100,7 +99,6 @@ private class FrameInterpolationShaderProgram(
                 clamp(vTexCoords + bestOffset, vec2(0.0), vec2(1.0))
             ).rgb;
 
-            // 急激なシーン切替（フラッシュ・カット変わり）では補間を抑えて二重像を防ぐ
             float sceneDiff = length(curr - motionCompensatedPrev);
             float sceneCutMask = 1.0 - smoothstep(0.18, 0.45, sceneDiff);
 
@@ -228,11 +226,11 @@ private class FrameInterpolationShaderProgram(
         hasPrevFrame = false
     }
 
-    override fun configure(inputWidth: Int, inputHeight: Int): androidx.media3.common.util.Size {
+    override fun configure(inputWidth: Int, inputHeight: Int): Size {
         texWidth = inputWidth.coerceAtLeast(1)
         texHeight = inputHeight.coerceAtLeast(1)
         ensureHistoryBuffer(texWidth, texHeight)
-        return androidx.media3.common.util.Size(texWidth, texHeight)
+        return Size(texWidth, texHeight)
     }
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
@@ -269,7 +267,6 @@ private class FrameInterpolationShaderProgram(
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-        // 次フレーム用に現在の入力テクスチャを履歴バッファへ保存
         if (prevFbo != 0 && prevTextureId != 0) {
             val prevViewport = IntArray(4)
             GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, prevViewport, 0)
@@ -302,5 +299,5 @@ private class FrameInterpolationShaderProgram(
 @UnstableApi
 fun buildFrameInterpolationEffects(mode: FrameInterpolationMode): List<Effect> {
     if (mode == FrameInterpolationMode.OFF) return emptyList()
-    return listOf(FrameInterpolationEffect(blendFactor = mode.blendFactor))
+    return listOf<Effect>(FrameInterpolationEffect(blendFactor = mode.blendFactor))
 }
