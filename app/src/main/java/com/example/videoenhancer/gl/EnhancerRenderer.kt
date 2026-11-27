@@ -41,6 +41,7 @@ class EnhancerRenderer(
     private var videoInputSurface: Surface? = null
     private val texMatrix = FloatArray(16)
     private val newFrameAvailable = AtomicBoolean(false)
+    private var lastFrameTimestampNs = 0L
 
     private var oesTo2dShader: ShaderProgram? = null
     private var pass1FlowShader: ShaderProgram? = null
@@ -151,8 +152,15 @@ class EnhancerRenderer(
         Choreographer.getInstance().postFrameCallback(this)
 
         try {
-            val gotNewFrame = newFrameAvailable.compareAndSet(true, false)
+            // コールバック発火またはタイムスタンプ変化の両方で新フレームを確実に検知
+            val st = videoSurfaceTexture ?: return
+            newFrameAvailable.set(false)
+            st.updateTexImage()
+            val currentTs = st.timestamp
+            val gotNewFrame = (currentTs != 0L && currentTs != lastFrameTimestampNs)
+
             if (gotNewFrame) {
+                lastFrameTimestampNs = currentTs
                 ingestNewVideoFrame(frameTimeNanos)
             }
 
@@ -199,7 +207,6 @@ class EnhancerRenderer(
 
     private fun ingestNewVideoFrame(arrivalTimeNs: Long) {
         val st = videoSurfaceTexture ?: return
-        st.updateTexImage()
         st.getTransformMatrix(texMatrix)
 
         if (currFrameArrivalNs > 0L) {
@@ -219,7 +226,6 @@ class EnhancerRenderer(
         val prevTarget = fboFramePrev ?: return
         val flowTarget = fboFlowMap ?: return
 
-        // OESテクスチャを通常の2Dテクスチャ (currTarget) へ転写
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, currTarget.fboId)
         GLES30.glViewport(0, 0, currTarget.width, currTarget.height)
         oesTo2dShader?.apply {
@@ -265,7 +271,6 @@ class EnhancerRenderer(
 
         val interpEnabled = if (interpolationMultiplier > 1.01f) 1 else 0
 
-        // Pass 2: 補間フレーム生成
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, interpTarget.fboId)
         GLES30.glViewport(0, 0, interpTarget.width, interpTarget.height)
         pass2InterpShader?.apply {
@@ -279,7 +284,6 @@ class EnhancerRenderer(
             ShaderProgram.drawQuad(quadBuffer)
         }
 
-        // Pass 3: 画面へ超解像＆分割比較描画
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
         GLES30.glClearColor(0f, 0f, 0f, 1f)
@@ -373,6 +377,7 @@ class EnhancerRenderer(
     private fun recreateFbos(width: Int, height: Int) {
         deleteFbos()
         hasValidPrevFrame = false
+        lastFrameTimestampNs = 0L
         fboFramePrev = createFboTarget(width, height)
         fboFrameCurr = createFboTarget(width, height)
         fboInterpOut = createFboTarget(width, height)
@@ -391,61 +396,4 @@ class EnhancerRenderer(
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
-
-        val fboIds = IntArray(1)
-        GLES30.glGenFramebuffers(1, fboIds, 0)
-        val fboId = fboIds[0]
-
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
-        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, texId, 0)
-
-        val status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
-        if (status != GLES30.GL_FRAMEBUFFER_COMPLETE) {
-            onError("FBO作成エラー: status=0x${Integer.toHexString(status)}")
-        }
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-
-        return FrameBufferTarget(fboId, texId, width, height)
-    }
-
-    private fun deleteFbos() {
-        listOfNotNull(fboFramePrev, fboFrameCurr, fboFlowMap, fboInterpOut).forEach {
-            GLES30.glDeleteFramebuffers(1, intArrayOf(it.fboId), 0)
-            GLES30.glDeleteTextures(1, intArrayOf(it.texId), 0)
-        }
-        fboFramePrev = null
-        fboFrameCurr = null
-        fboFlowMap = null
-        fboInterpOut = null
-    }
-
-    private fun releaseGlResources() {
-        deleteFbos()
-        oesTo2dShader?.release()
-        pass1FlowShader?.release()
-        pass2InterpShader?.release()
-        pass3FsrShader?.release()
-        pass3Anime4kShader?.release()
-        videoInputSurface?.release()
-        videoSurfaceTexture?.release()
-        if (oesTextureId != 0) {
-            GLES30.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
-            oesTextureId = 0
-        }
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            EGL14.eglDestroySurface(eglDisplay, eglSurface)
-            EGL14.eglDestroyContext(eglDisplay, eglContext)
-            EGL14.eglTerminate(eglDisplay)
-        }
-        eglDisplay = EGL14.EGL_NO_DISPLAY
-        eglContext = EGL14.EGL_NO_CONTEXT
-        eglSurface = EGL14.EGL_NO_SURFACE
-    }
-
-    fun shutdown() {
-        onSurfaceDestroyed()
-        glThread.quitSafely()
-    }
-}
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO
