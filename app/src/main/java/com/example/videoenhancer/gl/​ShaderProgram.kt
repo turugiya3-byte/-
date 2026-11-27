@@ -12,27 +12,26 @@ class ShaderProgram(
     fragmentAssetPath: String
 ) {
     val programId: Int
-    private val uniformLocations = mutableMapOf<String, Int>()
 
     init {
         val vertexSrc = context.assets.open(vertexAssetPath).bufferedReader().use { it.readText() }
         val fragmentSrc = context.assets.open(fragmentAssetPath).bufferedReader().use { it.readText() }
-
         val vs = compileShader(GLES30.GL_VERTEX_SHADER, vertexSrc, vertexAssetPath)
         val fs = compileShader(GLES30.GL_FRAGMENT_SHADER, fragmentSrc, fragmentAssetPath)
 
-        programId = GLES30.glCreateProgram().also { prog ->
-            GLES30.glAttachShader(prog, vs)
-            GLES30.glAttachShader(prog, fs)
-            GLES30.glLinkProgram(prog)
+        programId = GLES30.glCreateProgram()
+        GLES30.glAttachShader(programId, vs)
+        GLES30.glAttachShader(programId, fs)
+        GLES30.glBindAttribLocation(programId, 0, "aPosition")
+        GLES30.glBindAttribLocation(programId, 1, "aTexCoord")
+        GLES30.glLinkProgram(programId)
 
-            val linkStatus = IntArray(1)
-            GLES30.glGetProgramiv(prog, GLES30.GL_LINK_STATUS, linkStatus, 0)
-            if (linkStatus[0] == 0) {
-                val log = GLES30.glGetProgramInfoLog(prog)
-                GLES30.glDeleteProgram(prog)
-                throw RuntimeException("Program link error ($fragmentAssetPath): $log")
-            }
+        val status = IntArray(1)
+        GLES30.glGetProgramiv(programId, GLES30.GL_LINK_STATUS, status, 0)
+        if (status[0] == 0) {
+            val log = GLES30.glGetProgramInfoLog(programId)
+            GLES30.glDeleteProgram(programId)
+            throw RuntimeException("Shader link error ($fragmentAssetPath): $log")
         }
         GLES30.glDeleteShader(vs)
         GLES30.glDeleteShader(fs)
@@ -40,81 +39,67 @@ class ShaderProgram(
 
     fun use() = GLES30.glUseProgram(programId)
 
-    private fun getUniformLoc(name: String): Int =
-        uniformLocations.getOrPut(name) { GLES30.glGetUniformLocation(programId, name) }
-
-    fun setInt(name: String, value: Int) {
-        val loc = getUniformLoc(name)
-        if (loc >= 0) GLES30.glUniform1i(loc, value)
+    fun bindTexture(name: String, unit: Int, texId: Int, target: Int = GLES30.GL_TEXTURE_2D) {
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + unit)
+        GLES30.glBindTexture(target, texId)
+        val loc = GLES30.glGetUniformLocation(programId, name)
+        if (loc >= 0) GLES30.glUniform1i(loc, unit)
     }
 
-    fun setFloat(name: String, value: Float) {
-        val loc = getUniformLoc(name)
-        if (loc >= 0) GLES30.glUniform1f(loc, value)
+    fun setFloat(name: String, v: Float) {
+        val loc = GLES30.glGetUniformLocation(programId, name)
+        if (loc >= 0) GLES30.glUniform1f(loc, v)
+    }
+
+    fun setInt(name: String, v: Int) {
+        val loc = GLES30.glGetUniformLocation(programId, name)
+        if (loc >= 0) GLES30.glUniform1i(loc, v)
     }
 
     fun setVec2(name: String, x: Float, y: Float) {
-        val loc = getUniformLoc(name)
+        val loc = GLES30.glGetUniformLocation(programId, name)
         if (loc >= 0) GLES30.glUniform2f(loc, x, y)
     }
 
-    fun setMat4(name: String, matrix: FloatArray) {
-        val loc = getUniformLoc(name)
-        if (loc >= 0) GLES30.glUniformMatrix4fv(loc, 1, false, matrix, 0)
+    fun setMat4(name: String, m: FloatArray) {
+        val loc = GLES30.glGetUniformLocation(programId, name)
+        if (loc >= 0) GLES30.glUniformMatrix4fv(loc, 1, false, m, 0)
     }
 
-    fun bindTexture(name: String, unit: Int, textureId: Int, target: Int = GLES30.GL_TEXTURE_2D) {
-        GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + unit)
-        GLES30.glBindTexture(target, textureId)
-        setInt(name, unit)
-    }
-
-    fun release() = GLES30.glDeleteProgram(programId)
-
-    private fun compileShader(type: Int, source: String, name: String): Int {
-        val shader = GLES30.glCreateShader(type)
-        GLES30.glShaderSource(shader, source)
-        GLES30.glCompileShader(shader)
-        val compiled = IntArray(1)
-        GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, compiled, 0)
-        if (compiled[0] == 0) {
-            val log = GLES30.glGetShaderInfoLog(shader)
-            GLES30.glDeleteShader(shader)
-            throw RuntimeException("Shader compile error ($name): $log")
-        }
-        return shader
+    fun release() {
+        if (programId != 0) GLES30.glDeleteProgram(programId)
     }
 
     companion object {
-        private val QUAD_VERTICES = floatArrayOf(
-            -1f, -1f, 0f, 0f,
-             1f, -1f, 1f, 0f,
-            -1f,  1f, 0f, 1f,
-             1f,  1f, 1f, 1f
-        )
+        private val QUAD = floatArrayOf(-1f, -1f, 0f, 0f, 1f, -1f, 1f, 0f, -1f, 1f, 0f, 1f, 1f, 1f, 1f, 1f)
 
-        fun createQuadBuffer(): FloatBuffer =
-            ByteBuffer.allocateDirect(QUAD_VERTICES.size * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer()
-                .apply {
-                    put(QUAD_VERTICES)
-                    position(0)
-                }
+        fun createQuadBuffer(): FloatBuffer = ByteBuffer.allocateDirect(QUAD.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(QUAD); position(0) }
 
-        fun drawQuad(quadBuffer: FloatBuffer) {
-            quadBuffer.position(0)
+        fun drawQuad(buf: FloatBuffer) {
+            buf.position(0)
             GLES30.glEnableVertexAttribArray(0)
-            GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 16, quadBuffer)
-
-            quadBuffer.position(2)
+            GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 16, buf)
+            buf.position(2)
             GLES30.glEnableVertexAttribArray(1)
-            GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 16, quadBuffer)
-
+            GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 16, buf)
             GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
-
             GLES30.glDisableVertexAttribArray(0)
             GLES30.glDisableVertexAttribArray(1)
+        }
+
+        private fun compileShader(type: Int, src: String, name: String): Int {
+            val s = GLES30.glCreateShader(type)
+            GLES30.glShaderSource(s, src)
+            GLES30.glCompileShader(s)
+            val ok = IntArray(1)
+            GLES30.glGetShaderiv(s, GLES30.GL_COMPILE_STATUS, ok, 0)
+            if (ok[0] == 0) {
+                val log = GLES30.glGetShaderInfoLog(s)
+                GLES30.glDeleteShader(s)
+                throw RuntimeException("Shader compile error ($name): $log")
+            }
+            return s
         }
     }
 }
