@@ -134,9 +134,9 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 PlayerScreen(
                     uiState = uiState,
-                    onSurfaceCreated = { renderer.onSurfaceCreated(it) },
-                    onSurfaceChanged = { w, h -> renderer.onSurfaceChanged(w, h) },
-                    onSurfaceDestroyed = { renderer.onSurfaceDestroyed() },
+                    onSurfaceTextureAvailable = { st, w, h -> renderer.onSurfaceTextureAvailable(st, w, h) },
+                    onSurfaceTextureSizeChanged = { w, h -> renderer.onSurfaceChanged(w, h) },
+                    onSurfaceTextureDestroyed = { renderer.onSurfaceDestroyed() },
                     onSelectVideoUri = { uri, explicitTitle -> playVideoUri(uri, explicitTitle) },
                     onSelectYouTubeUrl = { url -> playYouTubeUrl(url) },
                     onPlayPauseToggle = {
