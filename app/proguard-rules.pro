@@ -1,0 +1,9 @@
+-keep class com.hierynomus.** { *; }
+-dontwarn com.hierynomus.**
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+-keep class org.schabi.newpipe.** { *; }
+-dontwarn org.schabi.newpipe.**
+-keep class org.mozilla.javascript.** { *; }
+-dontwarn org.mozilla.javascript.**
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
