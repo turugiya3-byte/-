@@ -1,8 +1,8 @@
 package com.example.videoenhancer.ui
 
+import android.graphics.SurfaceTexture
 import android.net.Uri
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -74,9 +74,9 @@ data class EnhancerUiState(
 @Composable
 fun PlayerScreen(
     uiState: EnhancerUiState,
-    onSurfaceCreated: (SurfaceHolder) -> Unit,
-    onSurfaceChanged: (Int, Int) -> Unit,
-    onSurfaceDestroyed: () -> Unit,
+    onSurfaceTextureAvailable: (SurfaceTexture, Int, Int) -> Unit,
+    onSurfaceTextureSizeChanged: (Int, Int) -> Unit,
+    onSurfaceTextureDestroyed: () -> Unit,
     onSelectVideoUri: (Uri, String?) -> Unit,
     onSelectYouTubeUrl: (String) -> Unit,
     onPlayPauseToggle: () -> Unit,
@@ -113,6 +113,7 @@ fun PlayerScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(Color.Black)
             .onSizeChanged { viewportWidthPx = it.width.toFloat().coerceAtLeast(1f) }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -121,23 +122,33 @@ fun PlayerScreen(
                 controlsVisible = !controlsVisible
             }
     ) {
-        // 1. OpenGL ES 描画先（ZOrderMediaOverlay で Compose 背景より前面に表示）
+        // 1. OpenGL ES 描画先（Composeと100%親和性の高い TextureView）
         AndroidView(
             factory = { ctx ->
-                SurfaceView(ctx).apply {
-                    setZOrderMediaOverlay(true)
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) = onSurfaceCreated(holder)
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) =
-                            onSurfaceChanged(width, height)
-                        override fun surfaceDestroyed(holder: SurfaceHolder) = onSurfaceDestroyed()
-                    })
+                TextureView(ctx).apply {
+                    isOpaque = true
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                            onSurfaceTextureAvailable(surface, width, height)
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                            onSurfaceTextureSizeChanged(width, height)
+                        }
+
+                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                            onSurfaceTextureDestroyed()
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. スワイプジェスチャー層（左右シーク / 左上下輝度 / 右上下音量）
+        // 2. スワイプジェスチャー層
         PlayerGestureLayer(
             currentPositionMs = uiState.currentPositionMs,
             durationMs = uiState.durationMs,
@@ -232,7 +243,6 @@ fun PlayerScreen(
                         )
                     )
             ) {
-                // 上部バー
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -277,7 +287,6 @@ fun PlayerScreen(
                     }
                 }
 
-                // 中央再生ボタン
                 IconButton(
                     onClick = onPlayPauseToggle,
                     modifier = Modifier
@@ -293,7 +302,6 @@ fun PlayerScreen(
                     )
                 }
 
-                // 下部バー
                 val multipliers = listOf(1.0f, 1.5f, 2.0f, 2.5f, 3.0f)
                 Column(
                     modifier = Modifier
@@ -351,7 +359,6 @@ fun PlayerScreen(
             }
         }
 
-        // ダイアログ群
         if (showSmbDialog) {
             SmbBrowserDialog(
                 onDismiss = { showSmbDialog = false },
