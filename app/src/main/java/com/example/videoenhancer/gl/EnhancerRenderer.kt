@@ -6,9 +6,7 @@ import android.opengl.*
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
-import android.view.Choreographer
 import android.view.Surface
-import android.view.SurfaceHolder
 import com.example.videoenhancer.ui.UpscaleMode
 import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,7 +17,7 @@ class EnhancerRenderer(
     private val onVideoInputSurfaceReady: (Surface) -> Unit,
     private val onStatsUpdated: (outputFps: Float, gpuFrameTimeMs: Float) -> Unit,
     private val onError: (String) -> Unit = {}
-) : Choreographer.FrameCallback {
+) {
 
     private data class FrameBufferTarget(
         val fboId: Int,
@@ -83,22 +81,34 @@ class EnhancerRenderer(
     @Volatile var sharpness: Float = 0.65f
     @Volatile var splitPosition: Float = 0.5f
 
-    private var isRunning = false
-    private var lastRenderVsyncNs = 0L
+    @Volatile private var isRunning = false
     private var renderedFrameCount = 0
     private var statsWindowStartNs = 0L
     private var accumulatedGpuTimeNs = 0L
 
-    fun onSurfaceCreated(holder: SurfaceHolder) {
+    private val renderLoopRunnable = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            renderTick()
+            val targetFps = (sourceFps * interpolationMultiplier).coerceIn(24f, 120f)
+            val delayMs = (1000.0 / targetFps).toLong().coerceIn(8L, 42L)
+            glHandler.postDelayed(this, delayMs)
+        }
+    }
+
+    fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
         glHandler.post {
             try {
-                displaySurface = holder.surface
-                initEgl(holder.surface)
+                viewportWidth = width.coerceAtLeast(1)
+                viewportHeight = height.coerceAtLeast(1)
+                val outSurface = Surface(surfaceTexture)
+                displaySurface = outSurface
+                initEgl(outSurface)
                 initShadersAndInputTexture()
                 updateDisplayFrameRate()
                 isRunning = true
                 statsWindowStartNs = System.nanoTime()
-                Choreographer.getInstance().postFrameCallback(this)
+                glHandler.post(renderLoopRunnable)
             } catch (e: Throwable) {
                 isRunning = false
                 onError("GL初期化エラー: ${e.message}")
@@ -115,12 +125,9 @@ class EnhancerRenderer(
     }
 
     fun onSurfaceDestroyed() {
+        isRunning = false
+        glHandler.removeCallbacks(renderLoopRunnable)
         glHandler.post {
-            isRunning = false
-            try {
-                Choreographer.getInstance().removeFrameCallback(this)
-            } catch (_: Exception) {
-            }
             releaseGlResources()
         }
     }
@@ -148,11 +155,9 @@ class EnhancerRenderer(
         }
     }
 
-    override fun doFrame(frameTimeNanos: Long) {
-        if (!isRunning) return
-        Choreographer.getInstance().postFrameCallback(this)
-
+    private fun renderTick() {
         try {
+            val nowNs = System.nanoTime()
             val st = videoSurfaceTexture ?: return
             val callbackFired = newFrameAvailable.compareAndSet(true, false)
             st.updateTexImage()
@@ -162,23 +167,13 @@ class EnhancerRenderer(
 
             if (gotNewFrame) {
                 lastFrameTimestampNs = currentTs
-                ingestNewVideoFrame(frameTimeNanos)
+                ingestNewVideoFrame(nowNs)
             }
 
-            if (!hasValidPrevFrame) return
-
-            val targetFps = sourceFps * interpolationMultiplier
-            val targetIntervalNs = (1_000_000_000.0 / targetFps).toLong()
-
-            if (!gotNewFrame && (frameTimeNanos - lastRenderVsyncNs < targetIntervalNs * 0.90)) {
-                return
-            }
-            lastRenderVsyncNs = frameTimeNanos
-
-            val alpha = if (interpolationMultiplier <= 1.01f || gotNewFrame) {
+            val alpha = if (interpolationMultiplier <= 1.01f || gotNewFrame || !hasValidPrevFrame) {
                 1.0f
             } else {
-                val elapsedSinceCurrFrame = (frameTimeNanos - currFrameArrivalNs).coerceAtLeast(0L)
+                val elapsedSinceCurrFrame = (nowNs - currFrameArrivalNs).coerceAtLeast(0L)
                 (elapsedSinceCurrFrame.toFloat() / estimatedSourceIntervalNs.toFloat()).coerceIn(0.0f, 1.0f)
             }
 
@@ -191,14 +186,14 @@ class EnhancerRenderer(
 
             renderedFrameCount++
             accumulatedGpuTimeNs += (gpuEndNs - gpuStartNs)
-            val windowElapsedNs = frameTimeNanos - statsWindowStartNs
+            val windowElapsedNs = nowNs - statsWindowStartNs
             if (windowElapsedNs >= 500_000_000L) {
                 val actualFps = renderedFrameCount * 1_000_000_000f / windowElapsedNs
                 val avgGpuMs = (accumulatedGpuTimeNs / renderedFrameCount) / 1_000_000f
                 onStatsUpdated(actualFps, avgGpuMs)
                 renderedFrameCount = 0
                 accumulatedGpuTimeNs = 0L
-                statsWindowStartNs = frameTimeNanos
+                statsWindowStartNs = nowNs
             }
         } catch (e: Throwable) {
             isRunning = false
@@ -264,6 +259,13 @@ class EnhancerRenderer(
     }
 
     private fun renderPass2AndPass3(alpha: Float) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
+        GLES30.glClearColor(0.04f, 0.06f, 0.12f, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+
+        if (!hasValidPrevFrame) return
+
         val prevTarget = fboFramePrev ?: return
         val currTarget = fboFrameCurr ?: return
         val flowTarget = fboFlowMap ?: return
@@ -285,10 +287,6 @@ class EnhancerRenderer(
         }
 
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
-        GLES30.glClearColor(0f, 0f, 0f, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-
         applyAspectFitViewport()
 
         val activeUpscaleShader = when (upscaleMode) {
@@ -327,11 +325,15 @@ class EnhancerRenderer(
 
     private fun initEgl(surface: Surface) {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) throw RuntimeException("eglGetDisplay failed")
+
         val version = IntArray(2)
-        EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
+            throw RuntimeException("eglInitialize failed")
+        }
 
         val configAttribs = intArrayOf(
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
@@ -340,17 +342,25 @@ class EnhancerRenderer(
         )
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
-        EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+        if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0) || configs[0] == null) {
+            throw RuntimeException("eglChooseConfig failed")
+        }
 
         val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+        if (eglContext == EGL14.EGL_NO_CONTEXT) throw RuntimeException("eglCreateContext failed")
+
         eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, configs[0], surface, intArrayOf(EGL14.EGL_NONE), 0)
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+        if (eglSurface == EGL14.EGL_NO_SURFACE) throw RuntimeException("eglCreateWindowSurface failed")
+
+        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+            throw RuntimeException("eglMakeCurrent failed")
+        }
     }
 
     private fun initShadersAndInputTexture() {
         quadBuffer = ShaderProgram.createQuadBuffer()
-        oesTo2dShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/oes_to_2d.glsl")
+        oesTo2dShader = ShaderProgram(context, "shaders/oes_vertex.glsl", "shaders/oes_to_2d.glsl")
         pass1FlowShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass1_optical_flow.glsl")
         pass2InterpShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass2_interpolate.glsl")
         pass3FsrShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass3_upscale_fsr.glsl")
@@ -445,6 +455,8 @@ class EnhancerRenderer(
         eglDisplay = EGL14.EGL_NO_DISPLAY
         eglContext = EGL14.EGL_NO_CONTEXT
         eglSurface = EGL14.EGL_NO_SURFACE
+        displaySurface?.release()
+        displaySurface = null
     }
 
     fun shutdown() {
