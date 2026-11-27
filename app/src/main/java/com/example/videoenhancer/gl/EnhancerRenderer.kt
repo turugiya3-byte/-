@@ -360,7 +360,7 @@ class EnhancerRenderer(
 
     private fun initShadersAndInputTexture() {
         quadBuffer = ShaderProgram.createQuadBuffer()
-        oesTo2dShader = ShaderProgram(context, "shaders/oes_vertex.glsl", "shaders/oes_to_2d.glsl")
+        oesTo2dShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/oes_to_2d.glsl")
         pass1FlowShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass1_optical_flow.glsl")
         pass2InterpShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass2_interpolate.glsl")
         pass3FsrShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass3_upscale_fsr.glsl")
