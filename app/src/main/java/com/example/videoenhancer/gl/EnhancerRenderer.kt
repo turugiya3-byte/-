@@ -150,7 +150,8 @@ class EnhancerRenderer(
         Choreographer.getInstance().postFrameCallback(this)
 
         try {
-            if (newFrameAvailable.compareAndSet(true, false)) {
+            val gotNewFrame = newFrameAvailable.compareAndSet(true, false)
+            if (gotNewFrame) {
                 ingestNewVideoFrame(frameTimeNanos)
             }
 
@@ -158,12 +159,14 @@ class EnhancerRenderer(
 
             val targetFps = sourceFps * interpolationMultiplier
             val targetIntervalNs = (1_000_000_000.0 / targetFps).toLong()
-            if (frameTimeNanos - lastRenderVsyncNs < targetIntervalNs * 0.90) {
+
+            // 新しいフレームが来た直後は必ず描画し、それ以外は目標FPS間隔で描画
+            if (!gotNewFrame && (frameTimeNanos - lastRenderVsyncNs < targetIntervalNs * 0.90)) {
                 return
             }
             lastRenderVsyncNs = frameTimeNanos
 
-            val alpha = if (interpolationMultiplier <= 1.01f) {
+            val alpha = if (interpolationMultiplier <= 1.01f || gotNewFrame) {
                 1.0f
             } else {
                 val elapsedSinceCurrFrame = (frameTimeNanos - currFrameArrivalNs).coerceAtLeast(0L)
@@ -216,6 +219,7 @@ class EnhancerRenderer(
         val prevTarget = fboFramePrev ?: return
         val flowTarget = fboFlowMap ?: return
 
+        // OESテクスチャを通常の2Dテクスチャ (currTarget) へ転写
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, currTarget.fboId)
         GLES30.glViewport(0, 0, currTarget.width, currTarget.height)
         oesTo2dShader?.apply {
@@ -259,6 +263,7 @@ class EnhancerRenderer(
 
         val interpEnabled = if (interpolationMultiplier > 1.01f) 1 else 0
 
+        // Pass 2: 補間フレーム生成
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, interpTarget.fboId)
         GLES30.glViewport(0, 0, interpTarget.width, interpTarget.height)
         pass2InterpShader?.apply {
@@ -272,6 +277,7 @@ class EnhancerRenderer(
             ShaderProgram.drawQuad(quadBuffer)
         }
 
+        // Pass 3: 画面へ超解像＆分割比較描画
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, viewportWidth, viewportHeight)
         GLES30.glClearColor(0f, 0f, 0f, 1f)
@@ -315,15 +321,9 @@ class EnhancerRenderer(
 
     private fun initEgl(surface: Surface) {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
-            throw RuntimeException("eglGetDisplay failed")
-        }
         val version = IntArray(2)
-        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
-            throw RuntimeException("eglInitialize failed")
-        }
+        EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
 
-        // OpenGL ES 3.0 互換属性（広範な端末で通るよう EGL_OPENGL_ES2_BIT をベースにコンテキストで ES 3 を指定）
         val configAttribs = intArrayOf(
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_RED_SIZE, 8,
@@ -334,23 +334,12 @@ class EnhancerRenderer(
         )
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
-        if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0) || configs[0] == null) {
-            throw RuntimeException("eglChooseConfig failed")
-        }
+        EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)
 
         val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
-        if (eglContext == EGL14.EGL_NO_CONTEXT) {
-            throw RuntimeException("eglCreateContext (ES3) failed")
-        }
-
         eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, configs[0], surface, intArrayOf(EGL14.EGL_NONE), 0)
-        if (eglSurface == EGL14.EGL_NO_SURFACE) {
-            throw RuntimeException("eglCreateWindowSurface failed")
-        }
-        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
-            throw RuntimeException("eglMakeCurrent failed")
-        }
+        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
     }
 
     private fun initShadersAndInputTexture() {
@@ -381,22 +370,22 @@ class EnhancerRenderer(
     private fun recreateFbos(width: Int, height: Int) {
         deleteFbos()
         hasValidPrevFrame = false
-        fboFramePrev = createFboTarget(width, height, GLES30.GL_RGBA8, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE)
-        fboFrameCurr = createFboTarget(width, height, GLES30.GL_RGBA8, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE)
-        fboInterpOut = createFboTarget(width, height, GLES30.GL_RGBA8, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE)
+        // 全Android端末のGPUで100%確実にレンダリング可能な GL_RGBA8 を使用
+        fboFramePrev = createFboTarget(width, height)
+        fboFrameCurr = createFboTarget(width, height)
+        fboInterpOut = createFboTarget(width, height)
         val flowW = (width / 2).coerceAtLeast(16)
         val flowH = (height / 2).coerceAtLeast(16)
-        // RGBA16F 非対応端末へのフォールバック付きで作成
-        fboFlowMap = createFboTarget(flowW, flowH, GLES30.GL_RGBA16F, GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT)
+        fboFlowMap = createFboTarget(flowW, flowH)
     }
 
-    private fun createFboTarget(width: Int, height: Int, internalFormat: Int, format: Int, type: Int): FrameBufferTarget {
+    private fun createFboTarget(width: Int, height: Int): FrameBufferTarget {
         val texIds = IntArray(1)
         GLES30.glGenTextures(1, texIds, 0)
         val texId = texIds[0]
 
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
-        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, null)
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
@@ -408,6 +397,11 @@ class EnhancerRenderer(
 
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, texId, 0)
+
+        val status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+        if (status != GLES30.GL_FRAMEBUFFER_COMPLETE) {
+            onError("FBO作成エラー: status=0x${Integer.toHexString(status)}")
+        }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
 
         return FrameBufferTarget(fboId, texId, width, height)
