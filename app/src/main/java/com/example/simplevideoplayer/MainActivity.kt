@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.Surface
+import android.view.SurfaceView
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -249,7 +250,7 @@ fun FrameInterpolationPlayerScreen() {
                         useController = false
                         resizeMode = resizeModeValue
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            holder?.surface?.let { surf ->
+                            (videoSurfaceView as? SurfaceView)?.holder?.surface?.let { surf ->
                                 try {
                                     surf.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
                                 } catch (_: Exception) {
