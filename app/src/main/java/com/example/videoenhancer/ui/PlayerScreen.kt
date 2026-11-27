@@ -122,7 +122,7 @@ fun PlayerScreen(
                 controlsVisible = !controlsVisible
             }
     ) {
-        // 1. OpenGL ES 描画先（Composeと100%親和性の高い TextureView）
+        // 1. OpenGL ES 描画先（既に Available な場合の取りこぼしも防止）
         AndroidView(
             factory = { ctx ->
                 TextureView(ctx).apply {
@@ -142,6 +142,9 @@ fun PlayerScreen(
                         }
 
                         override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                    }
+                    if (isAvailable && surfaceTexture != null) {
+                        onSurfaceTextureAvailable(surfaceTexture!!, width.coerceAtLeast(1), height.coerceAtLeast(1))
                     }
                 }
             },
@@ -459,56 +462,206 @@ private fun FilterDetailDialog(
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("超解像シャープネス強度: ${String.format(Locale.US, "%.2f", uiState.sharpness)}", style = MaterialTheme.typography.titleSmall)
-                    Slider(value = uiState.sharpness, onValueChange = onSharpnessChange, valueRange = 0.0f..1.0f)
-                }
-                HorizontalDivider()
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Before / After 分割比較表示", style = MaterialTheme.typography.titleSmall)
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { onSplitPositionChange(0.0f) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
-                            Text("全面AI", fontSize = 12.sp)
-                        }
-                        OutlinedButton(onClick = { onSplitPositionChange(0.5f) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
-                            Text("50%比較", fontSize = 12.sp)
-                        }
-                        OutlinedButton(onClick = { onSplitPositionChange(1.0f) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
-                            Text("全面元映像", fontSize = 12.sp)
-                        }
-                    }
-                }
-                HorizontalDivider()
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("字幕フォントサイズ: ${uiState.subtitleFontSizeSp.roundToInt()} sp", style = MaterialTheme.typography.titleSmall)
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SubtitleSizePreset.entries.forEach { preset ->
-                            FilterChip(
-                                selected = abs(uiState.subtitleFontSizeSp - preset.sizeSp) < 0.5f,
-                                onClick = { onSubtitleFontSizeChange(preset.sizeSp) },
-                                label = { Text(preset.label, fontSize = 12.sp) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                    Slider(value = uiState.subtitleFontSizeSp, onValueChange = onSubtitleFontSizeChange, valueRange = 12.0f..36.0f)
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("字幕表示位置（下端マージン）: ${uiState.subtitleBottomMarginDp.roundToInt()} dp", style = MaterialTheme.typography.titleSmall)
-                        TextButton(onClick = { onSubtitleBottomMarginChange(28f) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
-                            Text("標準に戻す", fontSize = 11.sp)
-                        }
-                    }
-                    Slider(value = uiState.subtitleBottomMarginDp, onValueChange = onSubtitleBottomMarginChange, valueRange = 8.0f..140.0f)
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("閉じる") }
-        }
-    )
-}
+                    Slider(value = uiState.sharpness, onValueChange = onSharpnessChange, valueRange = 0.0
+                           package com.example.videoenhancer.gl
 
-private fun formatTimeMs(ms: Long): String {
-    val totalSeconds = (ms / 1000).coerceAtLeast(0)
-    return String.format(Locale.US, "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
-}
+import android.content.Context
+import android.graphics.SurfaceTexture
+import android.opengl.*
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.view.Surface
+import com.example.videoenhancer.ui.UpscaleMode
+import java.nio.FloatBuffer
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
+
+class EnhancerRenderer(
+    private val context: Context,
+    private val onVideoInputSurfaceReady: (Surface) -> Unit,
+    private val onStatsUpdated: (outputFps: Float, gpuFrameTimeMs: Float) -> Unit,
+    private val onError: (String) -> Unit = {}
+) {
+
+    private data class FrameBufferTarget(
+        val fboId: Int,
+        val texId: Int,
+        val width: Int,
+        val height: Int
+    )
+
+    private val glThread = HandlerThread("EnhancerGLThread").apply { start() }
+    private val glHandler = Handler(glThread.looper)
+
+    private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
+    private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
+    private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var displaySurface: Surface? = null
+
+    private var oesTextureId = 0
+    private var videoSurfaceTexture: SurfaceTexture? = null
+    @Volatile var currentInputSurface: Surface? = null
+        private set
+    private val texMatrix = FloatArray(16)
+    private val newFrameAvailable = AtomicBoolean(false)
+    private var lastFrameTimestampNs = -1L
+
+    private var oesTo2dShader: ShaderProgram? = null
+    private var pass1FlowShader: ShaderProgram? = null
+    private var pass2InterpShader: ShaderProgram? = null
+    private var pass3FsrShader: ShaderProgram? = null
+    private var pass3Anime4kShader: ShaderProgram? = null
+    private lateinit var quadBuffer: FloatBuffer
+
+    private var fboFramePrev: FrameBufferTarget? = null
+    private var fboFrameCurr: FrameBufferTarget? = null
+    private var fboFlowMap: FrameBufferTarget? = null
+    private var fboInterpOut: FrameBufferTarget? = null
+
+    private var videoWidth = 1280
+    private var videoHeight = 720
+    private var viewportWidth = 1920
+    private var viewportHeight = 1080
+    private var hasValidPrevFrame = false
+
+    private var prevFrameArrivalNs = 0L
+    private var currFrameArrivalNs = 0L
+    private var estimatedSourceIntervalNs = 41_666_666L
+
+    @Volatile var sourceFps: Float = 24.0f
+        set(value) {
+            field = value.coerceAtLeast(1.0f)
+            estimatedSourceIntervalNs = (1_000_000_000.0 / field).toLong()
+            updateDisplayFrameRate()
+        }
+
+    @Volatile var interpolationMultiplier: Float = 2.0f
+        set(value) {
+            field = value.coerceIn(1.0f, 3.0f)
+            updateDisplayFrameRate()
+        }
+
+    @Volatile var upscaleMode: UpscaleMode = UpscaleMode.FSR_REALISTIC
+    @Volatile var sharpness: Float = 0.65f
+    @Volatile var splitPosition: Float = 0.5f
+
+    @Volatile private var isRunning = false
+    private var renderedFrameCount = 0
+    private var statsWindowStartNs = 0L
+    private var accumulatedGpuTimeNs = 0L
+
+    private val renderLoopRunnable = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            renderTick()
+            val targetFps = (sourceFps * interpolationMultiplier).coerceIn(24f, 120f)
+            val delayMs = (1000.0 / targetFps).toLong().coerceIn(8L, 42L)
+            glHandler.postDelayed(this, delayMs)
+        }
+    }
+
+    fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        glHandler.post {
+            try {
+                viewportWidth = width.coerceAtLeast(1)
+                viewportHeight = height.coerceAtLeast(1)
+                val outSurface = Surface(surfaceTexture)
+                displaySurface = outSurface
+                initEgl(outSurface)
+                initShadersAndInputTexture()
+                updateDisplayFrameRate()
+                isRunning = true
+                statsWindowStartNs = System.nanoTime()
+                glHandler.post(renderLoopRunnable)
+            } catch (e: Throwable) {
+                isRunning = false
+                onError("GL初期化エラー: ${e.message}")
+            }
+        }
+    }
+
+    fun onSurfaceChanged(width: Int, height: Int) {
+        glHandler.post {
+            viewportWidth = width.coerceAtLeast(1)
+            viewportHeight = height.coerceAtLeast(1)
+            updateDisplayFrameRate()
+        }
+    }
+
+    fun onSurfaceDestroyed() {
+        isRunning = false
+        glHandler.removeCallbacks(renderLoopRunnable)
+        glHandler.post {
+            releaseGlResources()
+        }
+    }
+
+    fun onVideoSizeChanged(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        glHandler.post {
+            videoSurfaceTexture?.setDefaultBufferSize(width, height)
+            if (isRunning && (videoWidth != width || videoHeight != height)) {
+                videoWidth = width
+                videoHeight = height
+                recreateFbos(width, height)
+            }
+        }
+    }
+
+    private fun updateDisplayFrameRate() {
+        val surface = displaySurface ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && surface.isValid) {
+            val targetFps = (sourceFps * interpolationMultiplier).coerceIn(24f, 120f)
+            try {
+                surface.setFrameRate(targetFps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun renderTick() {
+        try {
+            val nowNs = System.nanoTime()
+            val st = videoSurfaceTexture ?: return
+            val callbackFired = newFrameAvailable.compareAndSet(true, false)
+            st.updateTexImage()
+            val currentTs = st.timestamp
+            val timestampChanged = (currentTs != lastFrameTimestampNs)
+            val gotNewFrame = callbackFired || timestampChanged
+
+            if (gotNewFrame) {
+                lastFrameTimestampNs = currentTs
+                ingestNewVideoFrame(nowNs)
+            }
+
+            val alpha = if (interpolationMultiplier <= 1.01f || gotNewFrame || !hasValidPrevFrame) {
+                1.0f
+            } else {
+                val elapsedSinceCurrFrame = (nowNs - currFrameArrivalNs).coerceAtLeast(0L)
+                (elapsedSinceCurrFrame.toFloat() / estimatedSourceIntervalNs.toFloat()).coerceIn(0.0f, 1.0f)
+            }
+
+            val gpuStartNs = System.nanoTime()
+            renderPass2AndPass3(alpha)
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            }
+            val gpuEndNs = System.nanoTime()
+
+            renderedFrameCount++
+            accumulatedGpuTimeNs += (gpuEndNs - gpuStartNs)
+            val windowElapsedNs = nowNs - statsWindowStartNs
+            if (windowElapsedNs >= 500_000_000L) {
+                val actualFps = renderedFrameCount * 1_000_000_000f / windowElapsedNs
+                val avgGpuMs = (accumulatedGpuTimeNs / renderedFrameCount) / 1_000_000f
+                onStatsUpdated(actualFps, avgGpuMs)
+                renderedFrameCount = 0
+                accumulatedGpuTimeNs = 0L
+                statsWindowStartNs = nowNs
+            }
+        } catch (e: Throwable) {
+            isRunning = false
+            onError("描画エラー: ${e.message}")
+        }
+    }
