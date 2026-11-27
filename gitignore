@@ -1,0 +1,41 @@
+android-realtime-video-enhancer/
+├── .github/workflows/android-build.yml
+├── .gitignore
+├── build.gradle.kts
+├── settings.gradle.kts
+├── gradle.properties
+├── gradle/libs.versions.toml
+└── app/
+    ├── build.gradle.kts
+    ├── proguard-rules.pro
+    └── src/main/
+        ├── AndroidManifest.xml
+        ├── res/values/
+        │   ├── strings.xml
+        │   └── themes.xml
+        ├── assets/shaders/
+        │   ├── common_vertex.glsl
+        │   ├── oes_to_2d.glsl
+        │   ├── pass1_optical_flow.glsl
+        │   ├── pass2_interpolate.glsl
+        │   ├── pass3_upscale_fsr.glsl
+        │   └── pass3_upscale_anime4k.glsl
+        └── java/com/example/videoenhancer/
+            ├── MainActivity.kt
+            ├── gl/
+            │   ├── ShaderProgram.kt
+            │   └── EnhancerRenderer.kt
+            ├── player/
+            │   ├── TrackSelectionHelper.kt
+            │   ├── smb/
+            │   │   ├── SmbDataSource.kt
+            │   │   ├── SmbBrowserRepository.kt
+            │   │   └── SmbHistoryStore.kt
+            │   └── youtube/
+            │       ├── OkHttpDownloader.kt
+            │       └── YouTubeStreamExtractor.kt
+            └── ui/
+                ├── PlayerScreen.kt
+                ├── SmbBrowserDialog.kt
+                ├── TrackSelectionDialog.kt
+                └── SubtitleOverlay.kt
