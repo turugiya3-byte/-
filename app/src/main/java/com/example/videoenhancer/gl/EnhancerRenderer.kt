@@ -205,7 +205,6 @@ class EnhancerRenderer(
             onError("描画エラー: ${e.message}")
         }
     }
-
     private fun ingestNewVideoFrame(arrivalTimeNs: Long) {
         val st = videoSurfaceTexture ?: return
         st.getTransformMatrix(texMatrix)
@@ -323,4 +322,133 @@ class EnhancerRenderer(
             drawH = viewportHeight
             drawW = (viewportHeight * videoAspect).roundToInt()
         }
-        GLES30.glViewport((viewportWidth - drawW) / 2, (viewport
+        GLES30.glViewport((viewportWidth - drawW) / 2, (viewportHeight - drawH) / 2, drawW, drawH)
+    }
+
+    private fun initEgl(surface: Surface) {
+        eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        val version = IntArray(2)
+        EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+
+        val configAttribs = intArrayOf(
+            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RED_SIZE, 8,
+            EGL14.EGL_GREEN_SIZE, 8,
+            EGL14.EGL_BLUE_SIZE, 8,
+            EGL14.EGL_ALPHA_SIZE, 8,
+            EGL14.EGL_NONE
+        )
+        val configs = arrayOfNulls<EGLConfig>(1)
+        val numConfigs = IntArray(1)
+        EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+
+        val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE)
+        eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+        eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, configs[0], surface, intArrayOf(EGL14.EGL_NONE), 0)
+        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+    }
+
+    private fun initShadersAndInputTexture() {
+        quadBuffer = ShaderProgram.createQuadBuffer()
+        oesTo2dShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/oes_to_2d.glsl")
+        pass1FlowShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass1_optical_flow.glsl")
+        pass2InterpShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass2_interpolate.glsl")
+        pass3FsrShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass3_upscale_fsr.glsl")
+        pass3Anime4kShader = ShaderProgram(context, "shaders/common_vertex.glsl", "shaders/pass3_upscale_anime4k.glsl")
+
+        val texIds = IntArray(1)
+        GLES30.glGenTextures(1, texIds, 0)
+        oesTextureId = texIds[0]
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+
+        videoSurfaceTexture = SurfaceTexture(oesTextureId).apply {
+            setDefaultBufferSize(videoWidth, videoHeight)
+            setOnFrameAvailableListener({ newFrameAvailable.set(true) }, glHandler)
+        }
+        val surface = Surface(videoSurfaceTexture)
+        currentInputSurface = surface
+        onVideoInputSurfaceReady(surface)
+        recreateFbos(videoWidth, videoHeight)
+    }
+
+    private fun recreateFbos(width: Int, height: Int) {
+        deleteFbos()
+        hasValidPrevFrame = false
+        lastFrameTimestampNs = -1L
+        fboFramePrev = createFboTarget(width, height)
+        fboFrameCurr = createFboTarget(width, height)
+        fboInterpOut = createFboTarget(width, height)
+        val flowW = (width / 2).coerceAtLeast(16)
+        val flowH = (height / 2).coerceAtLeast(16)
+        fboFlowMap = createFboTarget(flowW, flowH)
+    }
+
+    private fun createFboTarget(width: Int, height: Int): FrameBufferTarget {
+        val texIds = IntArray(1)
+        GLES30.glGenTextures(1, texIds, 0)
+        val texId = texIds[0]
+
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+
+        val fboIds = IntArray(1)
+        GLES30.glGenFramebuffers(1, fboIds, 0)
+        val fboId = fboIds[0]
+
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, texId, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+
+        return FrameBufferTarget(fboId, texId, width, height)
+    }
+
+    private fun deleteFbos() {
+        listOfNotNull(fboFramePrev, fboFrameCurr, fboFlowMap, fboInterpOut).forEach {
+            GLES30.glDeleteFramebuffers(1, intArrayOf(it.fboId), 0)
+            GLES30.glDeleteTextures(1, intArrayOf(it.texId), 0)
+        }
+        fboFramePrev = null
+        fboFrameCurr = null
+        fboFlowMap = null
+        fboInterpOut = null
+    }
+
+    private fun releaseGlResources() {
+        deleteFbos()
+        oesTo2dShader?.release()
+        pass1FlowShader?.release()
+        pass2InterpShader?.release()
+        pass3FsrShader?.release()
+        pass3Anime4kShader?.release()
+        currentInputSurface?.release()
+        currentInputSurface = null
+        videoSurfaceTexture?.release()
+        videoSurfaceTexture = null
+        if (oesTextureId != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
+            oesTextureId = 0
+        }
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            EGL14.eglDestroySurface(eglDisplay, eglSurface)
+            EGL14.eglDestroyContext(eglDisplay, eglContext)
+            EGL14.eglTerminate(eglDisplay)
+        }
+        eglDisplay = EGL14.EGL_NO_DISPLAY
+        eglContext = EGL14.EGL_NO_CONTEXT
+        eglSurface = EGL14.EGL_NO_SURFACE
+    }
+
+    fun shutdown() {
+        onSurfaceDestroyed()
+        glThread.quitSafely()
+    }
+}
