@@ -126,6 +126,7 @@ class EnhancerRenderer(
     fun onVideoSizeChanged(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
         glHandler.post {
+            videoSurfaceTexture?.setDefaultBufferSize(width, height)
             if (isRunning && (videoWidth != width || videoHeight != height)) {
                 videoWidth = width
                 videoHeight = height
@@ -160,7 +161,6 @@ class EnhancerRenderer(
             val targetFps = sourceFps * interpolationMultiplier
             val targetIntervalNs = (1_000_000_000.0 / targetFps).toLong()
 
-            // 新しいフレームが来た直後は必ず描画し、それ以外は目標FPS間隔で描画
             if (!gotNewFrame && (frameTimeNanos - lastRenderVsyncNs < targetIntervalNs * 0.90)) {
                 return
             }
@@ -228,6 +228,7 @@ class EnhancerRenderer(
             setMat4("uTexMatrix", texMatrix)
             ShaderProgram.drawQuad(quadBuffer)
         }
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
 
         if (!hasValidPrevFrame) {
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, prevTarget.fboId)
@@ -238,6 +239,7 @@ class EnhancerRenderer(
                 setMat4("uTexMatrix", texMatrix)
                 ShaderProgram.drawQuad(quadBuffer)
             }
+            GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
             hasValidPrevFrame = true
             return
         }
@@ -360,6 +362,7 @@ class EnhancerRenderer(
         GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
 
         videoSurfaceTexture = SurfaceTexture(oesTextureId).apply {
+            setDefaultBufferSize(videoWidth, videoHeight)
             setOnFrameAvailableListener({ newFrameAvailable.set(true) }, glHandler)
         }
         videoInputSurface = Surface(videoSurfaceTexture)
@@ -370,7 +373,6 @@ class EnhancerRenderer(
     private fun recreateFbos(width: Int, height: Int) {
         deleteFbos()
         hasValidPrevFrame = false
-        // 全Android端末のGPUで100%確実にレンダリング可能な GL_RGBA8 を使用
         fboFramePrev = createFboTarget(width, height)
         fboFrameCurr = createFboTarget(width, height)
         fboInterpOut = createFboTarget(width, height)
