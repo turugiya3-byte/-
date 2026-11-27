@@ -459,4 +459,49 @@ private fun FilterDetailDialog(
                     Text("Before / After 分割比較表示", style = MaterialTheme.typography.titleSmall)
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { onSplitPositionChange(0.0f) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
-                   
+                            Text("全面AI", fontSize = 12.sp)
+                        }
+                        OutlinedButton(onClick = { onSplitPositionChange(0.5f) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
+                            Text("50%比較", fontSize = 12.sp)
+                        }
+                        OutlinedButton(onClick = { onSplitPositionChange(1.0f) }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 4.dp)) {
+                            Text("全面元映像", fontSize = 12.sp)
+                        }
+                    }
+                }
+                HorizontalDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("字幕フォントサイズ: ${uiState.subtitleFontSizeSp.roundToInt()} sp", style = MaterialTheme.typography.titleSmall)
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SubtitleSizePreset.entries.forEach { preset ->
+                            FilterChip(
+                                selected = abs(uiState.subtitleFontSizeSp - preset.sizeSp) < 0.5f,
+                                onClick = { onSubtitleFontSizeChange(preset.sizeSp) },
+                                label = { Text(preset.label, fontSize = 12.sp) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    Slider(value = uiState.subtitleFontSizeSp, onValueChange = onSubtitleFontSizeChange, valueRange = 12.0f..36.0f)
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("字幕表示位置（下端マージン）: ${uiState.subtitleBottomMarginDp.roundToInt()} dp", style = MaterialTheme.typography.titleSmall)
+                        TextButton(onClick = { onSubtitleBottomMarginChange(28f) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                            Text("標準に戻す", fontSize = 11.sp)
+                        }
+                    }
+                    Slider(value = uiState.subtitleBottomMarginDp, onValueChange = onSubtitleBottomMarginChange, valueRange = 8.0f..140.0f)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("閉じる") }
+        }
+    )
+}
+
+private fun formatTimeMs(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    return String.format(Locale.US, "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+}
