@@ -57,11 +57,20 @@ class MainActivity : ComponentActivity() {
         val renderer = EnhancerRenderer(
             context = applicationContext,
             onVideoInputSurfaceReady = { inputSurface ->
-                runOnUiThread { exoPlayer?.setVideoSurface(inputSurface) }
+                runOnUiThread {
+                    if (inputSurface.isValid) {
+                        exoPlayer?.setVideoSurface(inputSurface)
+                    }
+                }
             },
             onStatsUpdated = { outputFps, gpuFrameTimeMs ->
                 runOnUiThread {
                     uiState = uiState.copy(currentOutputFps = outputFps, gpuFrameTimeMs = gpuFrameTimeMs)
+                }
+            },
+            onError = { errMsg ->
+                runOnUiThread {
+                    uiState = uiState.copy(videoTitle = errMsg)
                 }
             }
         )
@@ -198,10 +207,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun attachActiveVideoSurface(player: ExoPlayer) {
+        val surface = enhancerRenderer?.currentInputSurface
+        if (surface != null && surface.isValid) {
+            player.setVideoSurface(surface)
+        }
+    }
+
     private fun playVideoUri(uri: Uri, explicitTitle: String?) {
         val player = exoPlayer ?: return
         val title = explicitTitle ?: resolveDisplayTitle(uri)
         uiState = uiState.copy(videoTitle = title, currentPositionMs = 0L, durationMs = 0L, subtitleCues = emptyList())
+        attachActiveVideoSurface(player)
         player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
         player.playWhenReady = true
@@ -222,6 +239,7 @@ class MainActivity : ComponentActivity() {
                         currentPositionMs = 0L,
                         durationMs = 0L
                     )
+                    attachActiveVideoSurface(player)
                     player.setMediaSource(extracted.mediaSource)
                     player.prepare()
                     player.playWhenReady = true
