@@ -152,7 +152,6 @@ class EnhancerRenderer(
         Choreographer.getInstance().postFrameCallback(this)
 
         try {
-            // コールバック発火またはタイムスタンプ変化の両方で新フレームを確実に検知
             val st = videoSurfaceTexture ?: return
             newFrameAvailable.set(false)
             st.updateTexImage()
@@ -396,4 +395,56 @@ class EnhancerRenderer(
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+
+        val fboIds = IntArray(1)
+        GLES30.glGenFramebuffers(1, fboIds, 0)
+        val fboId = fboIds[0]
+
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, texId, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+
+        return FrameBufferTarget(fboId, texId, width, height)
+    }
+
+    private fun deleteFbos() {
+        listOfNotNull(fboFramePrev, fboFrameCurr, fboFlowMap, fboInterpOut).forEach {
+            GLES30.glDeleteFramebuffers(1, intArrayOf(it.fboId), 0)
+            GLES30.glDeleteTextures(1, intArrayOf(it.texId), 0)
+        }
+        fboFramePrev = null
+        fboFrameCurr = null
+        fboFlowMap = null
+        fboInterpOut = null
+    }
+
+    private fun releaseGlResources() {
+        deleteFbos()
+        oesTo2dShader?.release()
+        pass1FlowShader?.release()
+        pass2InterpShader?.release()
+        pass3FsrShader?.release()
+        pass3Anime4kShader?.release()
+        videoInputSurface?.release()
+        videoSurfaceTexture?.release()
+        if (oesTextureId != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
+            oesTextureId = 0
+        }
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            EGL14.eglDestroySurface(eglDisplay, eglSurface)
+            EGL14.eglDestroyContext(eglDisplay, eglContext)
+            EGL14.eglTerminate(eglDisplay)
+        }
+        eglDisplay = EGL14.EGL_NO_DISPLAY
+        eglContext = EGL14.EGL_NO_CONTEXT
+        eglSurface = EGL14.EGL_NO_SURFACE
+    }
+
+    fun shutdown() {
+        onSurfaceDestroyed()
+        glThread.quitSafely()
+    }
+}
