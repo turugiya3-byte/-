@@ -137,7 +137,15 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. 縁取り字幕オーバーレイ
+        // 2. スワイプジェスチャー層（左右シーク / 左上下輝度 / 右上下音量）
+        PlayerGestureLayer(
+            currentPositionMs = uiState.currentPositionMs,
+            durationMs = uiState.durationMs,
+            splitPosition = uiState.splitPosition,
+            onSeekTo = onSeekTo
+        )
+
+        // 3. 縁取り字幕オーバーレイ
         val effectiveBottomPadding = if (controlsVisible) {
             (uiState.subtitleBottomMarginDp + 90f).dp
         } else {
@@ -151,7 +159,7 @@ fun PlayerScreen(
                 .padding(bottom = effectiveBottomPadding)
         )
 
-        // 3. Before / After 比較ハンドル
+        // 4. Before / After 比較ハンドル
         if (uiState.splitPosition in 0.01f..0.99f) {
             Box(
                 modifier = Modifier
@@ -182,7 +190,7 @@ fun PlayerScreen(
             }
         }
 
-        // 4. FPS & GPU負荷 HUD
+        // 5. FPS & GPU負荷 HUD
         val targetFps = uiState.sourceFps * uiState.interpolationMultiplier
         Column(
             modifier = Modifier
@@ -208,7 +216,7 @@ fun PlayerScreen(
             )
         }
 
-        // 5. 操作オーバーレイ
+        // 6. 操作オーバーレイ
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
