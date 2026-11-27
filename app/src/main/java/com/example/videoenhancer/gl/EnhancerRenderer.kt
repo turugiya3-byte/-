@@ -200,6 +200,7 @@ class EnhancerRenderer(
             onError("描画エラー: ${e.message}")
         }
     }
+
     private fun ingestNewVideoFrame(arrivalTimeNs: Long) {
         val st = videoSurfaceTexture ?: return
         st.getTransformMatrix(texMatrix)
