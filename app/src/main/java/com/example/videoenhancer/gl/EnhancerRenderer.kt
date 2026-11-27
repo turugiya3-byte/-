@@ -17,7 +17,8 @@ import kotlin.math.roundToInt
 class EnhancerRenderer(
     private val context: Context,
     private val onVideoInputSurfaceReady: (Surface) -> Unit,
-    private val onStatsUpdated: (outputFps: Float, gpuFrameTimeMs: Float) -> Unit
+    private val onStatsUpdated: (outputFps: Float, gpuFrameTimeMs: Float) -> Unit,
+    private val onError: (String) -> Unit = {}
 ) : Choreographer.FrameCallback {
 
     private data class FrameBufferTarget(
@@ -88,13 +89,18 @@ class EnhancerRenderer(
 
     fun onSurfaceCreated(holder: SurfaceHolder) {
         glHandler.post {
-            displaySurface = holder.surface
-            initEgl(holder.surface)
-            initShadersAndInputTexture()
-            updateDisplayFrameRate()
-            isRunning = true
-            statsWindowStartNs = System.nanoTime()
-            Choreographer.getInstance().postFrameCallback(this)
+            try {
+                displaySurface = holder.surface
+                initEgl(holder.surface)
+                initShadersAndInputTexture()
+                updateDisplayFrameRate()
+                isRunning = true
+                statsWindowStartNs = System.nanoTime()
+                Choreographer.getInstance().postFrameCallback(this)
+            } catch (e: Throwable) {
+                isRunning = false
+                onError("GL初期化エラー: ${e.message}")
+            }
         }
     }
 
@@ -109,7 +115,10 @@ class EnhancerRenderer(
     fun onSurfaceDestroyed() {
         glHandler.post {
             isRunning = false
-            Choreographer.getInstance().removeFrameCallback(this)
+            try {
+                Choreographer.getInstance().removeFrameCallback(this)
+            } catch (_: Exception) {
+            }
             releaseGlResources()
         }
     }
@@ -117,7 +126,7 @@ class EnhancerRenderer(
     fun onVideoSizeChanged(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
         glHandler.post {
-            if (videoWidth != width || videoHeight != height) {
+            if (isRunning && (videoWidth != width || videoHeight != height)) {
                 videoWidth = width
                 videoHeight = height
                 recreateFbos(width, height)
@@ -140,41 +149,48 @@ class EnhancerRenderer(
         if (!isRunning) return
         Choreographer.getInstance().postFrameCallback(this)
 
-        if (newFrameAvailable.compareAndSet(true, false)) {
-            ingestNewVideoFrame(frameTimeNanos)
-        }
+        try {
+            if (newFrameAvailable.compareAndSet(true, false)) {
+                ingestNewVideoFrame(frameTimeNanos)
+            }
 
-        if (!hasValidPrevFrame) return
+            if (!hasValidPrevFrame) return
 
-        val targetFps = sourceFps * interpolationMultiplier
-        val targetIntervalNs = (1_000_000_000.0 / targetFps).toLong()
-        if (frameTimeNanos - lastRenderVsyncNs < targetIntervalNs * 0.90) {
-            return
-        }
-        lastRenderVsyncNs = frameTimeNanos
+            val targetFps = sourceFps * interpolationMultiplier
+            val targetIntervalNs = (1_000_000_000.0 / targetFps).toLong()
+            if (frameTimeNanos - lastRenderVsyncNs < targetIntervalNs * 0.90) {
+                return
+            }
+            lastRenderVsyncNs = frameTimeNanos
 
-        val alpha = if (interpolationMultiplier <= 1.01f) {
-            1.0f
-        } else {
-            val elapsedSinceCurrFrame = (frameTimeNanos - currFrameArrivalNs).coerceAtLeast(0L)
-            (elapsedSinceCurrFrame.toFloat() / estimatedSourceIntervalNs.toFloat()).coerceIn(0.0f, 1.0f)
-        }
+            val alpha = if (interpolationMultiplier <= 1.01f) {
+                1.0f
+            } else {
+                val elapsedSinceCurrFrame = (frameTimeNanos - currFrameArrivalNs).coerceAtLeast(0L)
+                (elapsedSinceCurrFrame.toFloat() / estimatedSourceIntervalNs.toFloat()).coerceIn(0.0f, 1.0f)
+            }
 
-        val gpuStartNs = System.nanoTime()
-        renderPass2AndPass3(alpha)
-        EGL14.eglSwapBuffers(eglDisplay, eglSurface)
-        val gpuEndNs = System.nanoTime()
+            val gpuStartNs = System.nanoTime()
+            renderPass2AndPass3(alpha)
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            }
+            val gpuEndNs = System.nanoTime()
 
-        renderedFrameCount++
-        accumulatedGpuTimeNs += (gpuEndNs - gpuStartNs)
-        val windowElapsedNs = frameTimeNanos - statsWindowStartNs
-        if (windowElapsedNs >= 500_000_000L) {
-            val actualFps = renderedFrameCount * 1_000_000_000f / windowElapsedNs
-            val avgGpuMs = (accumulatedGpuTimeNs / renderedFrameCount) / 1_000_000f
-            onStatsUpdated(actualFps, avgGpuMs)
-            renderedFrameCount = 0
-            accumulatedGpuTimeNs = 0L
-            statsWindowStartNs = frameTimeNanos
+            renderedFrameCount++
+            accumulatedGpuTimeNs += (gpuEndNs - gpuStartNs)
+            val windowElapsedNs = frameTimeNanos - statsWindowStartNs
+            if (windowElapsedNs >= 500_000_000L) {
+                val actualFps = renderedFrameCount * 1_000_000_000f / windowElapsedNs
+                val avgGpuMs = (accumulatedGpuTimeNs / renderedFrameCount) / 1_000_000f
+                onStatsUpdated(actualFps, avgGpuMs)
+                renderedFrameCount = 0
+                accumulatedGpuTimeNs = 0L
+                statsWindowStartNs = frameTimeNanos
+            }
+        } catch (e: Throwable) {
+            isRunning = false
+            onError("描画エラー: ${e.message}")
         }
     }
 
@@ -299,11 +315,17 @@ class EnhancerRenderer(
 
     private fun initEgl(surface: Surface) {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
+            throw RuntimeException("eglGetDisplay failed")
+        }
         val version = IntArray(2)
-        EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
+            throw RuntimeException("eglInitialize failed")
+        }
 
+        // OpenGL ES 3.0 互換属性（広範な端末で通るよう EGL_OPENGL_ES2_BIT をベースにコンテキストで ES 3 を指定）
         val configAttribs = intArrayOf(
-            EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
+            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
@@ -312,12 +334,23 @@ class EnhancerRenderer(
         )
         val configs = arrayOfNulls<EGLConfig>(1)
         val numConfigs = IntArray(1)
-        EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+        if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0) || configs[0] == null) {
+            throw RuntimeException("eglChooseConfig failed")
+        }
 
         val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            throw RuntimeException("eglCreateContext (ES3) failed")
+        }
+
         eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, configs[0], surface, intArrayOf(EGL14.EGL_NONE), 0)
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+        if (eglSurface == EGL14.EGL_NO_SURFACE) {
+            throw RuntimeException("eglCreateWindowSurface failed")
+        }
+        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+            throw RuntimeException("eglMakeCurrent failed")
+        }
     }
 
     private fun initShadersAndInputTexture() {
@@ -353,6 +386,7 @@ class EnhancerRenderer(
         fboInterpOut = createFboTarget(width, height, GLES30.GL_RGBA8, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE)
         val flowW = (width / 2).coerceAtLeast(16)
         val flowH = (height / 2).coerceAtLeast(16)
+        // RGBA16F 非対応端末へのフォールバック付きで作成
         fboFlowMap = createFboTarget(flowW, flowH, GLES30.GL_RGBA16F, GLES30.GL_RGBA, GLES30.GL_HALF_FLOAT)
     }
 
