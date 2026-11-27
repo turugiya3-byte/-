@@ -1,7 +1,6 @@
 #version 300 es
-#extension GL_OES_EGL_image_external_essl3 : enable
-#extension GL_OES_EGL_image_external : enable
-precision mediump float;
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
 
 in vec2 vTexCoord;
 out vec4 fragColor;
