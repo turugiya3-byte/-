@@ -1,14 +1,12 @@
-#version 300 es
-#extension GL_OES_EGL_image_external_essl3 : require
+#version 100
+#extension GL_OES_EGL_image_external : require
 precision mediump float;
 
-in vec2 vTexCoord;
-out vec4 fragColor;
-
-uniform samplerExternalOES uOesTex;
-uniform mat4 uTexMatrix;
+attribute vec4 aPosition;
+attribute vec2 aTexCoord;
+varying vec2 vTexCoord;
 
 void main() {
-    vec2 transformedUv = (uTexMatrix * vec4(vTexCoord, 0.0, 1.0)).xy;
-    fragColor = texture(uOesTex, transformedUv);
+    gl_Position = aPosition;
+    vTexCoord = aTexCoord;
 }
